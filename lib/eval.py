@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import tqdm
 
 # Import get_loaders function from data module within the same directory
 from .data import get_loaders 
@@ -59,10 +60,7 @@ def eval_ppl_wikitext(model, testenc, bs=1, device=None):
     print(f"nsamples {nsamples}")
 
     # Loop through each batch
-    for i in range(0, nsamples, bs):
-        if i % 50 == 0:
-            print(f"sample {i}")
-
+    for i in tqdm.tqdm(range(0, nsamples, bs)):
         # Calculate end index
         j = min(i+bs, nsamples)
 
