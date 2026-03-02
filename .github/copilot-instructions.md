@@ -1,5 +1,7 @@
 ### Project Overview: **Dynamic MoE-FLAP Router**
 
+If you change something update in shortly in the copilot-instructions.md!
+
 **The Goal:** Build a high-throughput, training-free LLM inference system that uses an RL Agent to dynamically route user prompts to specialized, pruned sub-networks (Experts) based on task complexity and domain.
 
 ---

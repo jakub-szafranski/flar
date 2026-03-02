@@ -97,8 +97,8 @@ def apply_expert(model, expert_data, device, *, unstr=False):
         # ── attention ──
         compress(
             layer,
-            attn_mask, None,
-            attn_baseline, None,
+            attn_mask.to(dev), None,
+            attn_baseline.to(dev), None,
             dev,
             bias=True,
             unstr=unstr,
@@ -111,8 +111,8 @@ def apply_expert(model, expert_data, device, *, unstr=False):
         # ── mlp ──
         compress(
             layer,
-            None, mlp_mask,
-            None, mlp_baseline,
+            None, mlp_mask.to(dev),
+            None, mlp_baseline.to(dev),
             dev,
             bias=True,
             unstr=unstr,
