@@ -99,8 +99,12 @@ A human-readable `_meta.json` sidecar is also written next to every `.pt`.
 #### Generation Speed Benchmarking
 - Always call `torch.cuda.empty_cache()` before timing after any prune/unprune cycles to avoid CUDA memory fragmentation skewing results.
 - Run a warmup generation (≥10 tokens) before timed runs so cuBLAS algorithm selection doesn't contaminate timing.
-- Print per-layer pruned shapes — if MLP intermediate dims are not multiples of 8, cuBLAS will use slow fallback kernels.
-- If structured pruning shows unexpected slowdowns, compare with `mom/apply_and_eval.py` (uses `compress()` directly) to isolate whether the issue is PrunableLLM or GPU/cuBLAS.
+
+#### MLP Mask Alignment (Tensor Core acceleration)
+- NVIDIA cuBLAS uses **64×64 tiles** for FP16 GEMM on Tensor Cores (Ampere, Ada Lovelace, Hopper). If a matrix dimension is not a multiple of 64, cuBLAS falls back to slow edge-safe kernels — even on A100/H100.
+- `extract.py` automatically **aligns MLP masks** at extraction time: after FLAP computes the pruning threshold, the mask is expanded to the nearest multiple of 64 by retaining the highest-importance neurons just below the cut-off. This keeps real weights (better quality than zero-padding) and means `PrunableLLM.prune()` needs no runtime padding.
+- Attention masks are inherently aligned (always `num_heads × 128`, where 128 is divisible by 64).
+- **Re-extract experts** after updating `extract.py` to get aligned masks; old `.pt` files with unaligned MLP dims will still work but will hit slow cuBLAS paths during structured inference.
 
 
 ---

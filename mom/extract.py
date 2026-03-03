@@ -42,6 +42,36 @@ def _compute_bias(mask, baseline_inp, output_weight, device):
 
 
 # ──────────────────────────────────────────────────────────────────
+#  Hardware alignment – pad MLP masks to Tensor-Core-friendly sizes
+# ──────────────────────────────────────────────────────────────────
+MLP_ALIGN = 64  # cuBLAS FP16 tile size; keeps dims on Tensor Core fast path
+
+
+def _align_mlp_mask(mask, importance, align_to=MLP_ALIGN):
+    """Expand *mask* so ``mask.sum()`` becomes a multiple of *align_to*.
+
+    Instead of padding with zeros at runtime, we simply retain the
+    highest-importance neurons that were just below the pruning threshold.
+    This is both faster (no dynamic padding in the hot path) and slightly
+    better quality-wise (real weights > zeros).
+
+    Attention masks are always ``num_heads × 128`` which is already a
+    multiple of 128, so they never need alignment.
+    """
+    n = int(mask.sum().item())
+    pad = (align_to - (n % align_to)) % align_to
+    if pad == 0:
+        return mask
+    pruned_idx = torch.where(~mask)[0]
+    if len(pruned_idx) < pad:          # edge case: nearly nothing pruned
+        return mask
+    _, topk = torch.topk(importance[pruned_idx], pad)
+    mask = mask.clone()
+    mask[pruned_idx[topk]] = True
+    return mask
+
+
+# ──────────────────────────────────────────────────────────────────
 #  Main extraction routine
 # ──────────────────────────────────────────────────────────────────
 def extract_flap_masks(
@@ -127,6 +157,7 @@ def extract_flap_masks(
     attn_metric_list, mlp_metric_list = [], []
     attn_baseline_inp_list, mlp_baseline_inp_list = [], []
     attn_mask_list, mlp_mask_list = [], []
+    mlp_importance_per_layer = []           # raw per-layer MLP importance (for mask alignment)
 
     # ── per-layer metric collection (mirrors prune_flap) ─────────
     for i in tqdm(range(num_layers), desc="[mom] collecting metrics"):
@@ -189,6 +220,7 @@ def extract_flap_masks(
                 )
             else:
                 W_metric = flap_metrics[metrics](wrapped_layers, subset, name)
+                mlp_importance_per_layer.append(W_metric.cpu())  # always save for alignment
                 if structure == "UL-UM":
                     thresh = torch.sort(W_metric.cuda())[0][
                         int(W_metric.numel() * pruning_ratio)
@@ -253,6 +285,20 @@ def extract_flap_masks(
     else:
         attn_mask_list = [m for m in torch.stack(attn_mask_list)]
         mlp_mask_list = [m for m in torch.stack(mlp_mask_list)]
+
+    # ── align MLP masks to multiples of 64 (Tensor Core friendly) ─
+    aligned_count = 0
+    for idx in range(num_layers):
+        old_n = int(mlp_mask_list[idx].sum().item())
+        mlp_mask_list[idx] = _align_mlp_mask(
+            mlp_mask_list[idx], mlp_importance_per_layer[idx]
+        )
+        new_n = int(mlp_mask_list[idx].sum().item())
+        if new_n != old_n:
+            aligned_count += 1
+    if aligned_count:
+        print(f"[mom] aligned MLP masks in {aligned_count}/{num_layers} layers "
+              f"to multiples of {MLP_ALIGN} (Tensor Core acceleration)")
 
     # ── pre-compute bias vectors and pack results ────────────────
     layer_data = {}

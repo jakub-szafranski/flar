@@ -90,6 +90,11 @@ def run_mode(wrapper: PrunableLLM, tokenizer, expert: dict, device: torch.device
     # ── 2. prune → generate ──────────────────────────────────────
     print("[2] Applying expert (prune)...")
     wrapper.prune(expert, unstr=unstr)
+    # print actual sparsity (uses lib.check_sparsity under the hood)
+    try:
+        print(f"  Sparsity (check_sparsity): {wrapper.sparsity()*100:.3f}%")
+    except Exception:
+        pass
     print(f"  Active expert: {wrapper.active_expert_info}")
     print(f"  GPU memory after prune:\n{mem_summary(device)}")
 
