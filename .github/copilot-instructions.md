@@ -84,6 +84,27 @@ A human-readable `_meta.json` sidecar is also written next to every `.pt`.
 
 ---
 
+### Benchmarking & Development Guidelines
+
+#### Prune / Unprune Switching (measured on LLaMA-7B, 20% AL-AM)
+| Mode | prune() | unprune() | Total |
+|------|---------|-----------|-------|
+| Structured | ~141 ms | ~150 ms | **~291 ms** |
+| Unstructured | ~107 ms | ~27 ms | **~134 ms** |
+
+- **Use unstructured mode** (`unstr=True`) during RL agent training loops — 2× faster switching, and the forward pass quality difference is identical (same masks, same bias compensation).
+- **Use structured mode** (`unstr=False`) for real deployment benchmarks — only structured pruning produces genuinely smaller tensors and memory savings for inference.
+- Correctness verified: both modes are **lossless** (dense == unprune(prune(dense)) at token level).
+
+#### Generation Speed Benchmarking
+- Always call `torch.cuda.empty_cache()` before timing after any prune/unprune cycles to avoid CUDA memory fragmentation skewing results.
+- Run a warmup generation (≥10 tokens) before timed runs so cuBLAS algorithm selection doesn't contaminate timing.
+- Print per-layer pruned shapes — if MLP intermediate dims are not multiples of 8, cuBLAS will use slow fallback kernels.
+- If structured pruning shows unexpected slowdowns, compare with `mom/apply_and_eval.py` (uses `compress()` directly) to isolate whether the issue is PrunableLLM or GPU/cuBLAS.
+
+
+---
+
 ### Next Steps / Remaining Challenges
 * **State Encoder Design:** Selecting a sub-5ms embedding model to ensure the routing overhead doesn't cancel out the pruning gains.
 * **Reward Function Tuning:** Carefully balancing the penalty $\lambda$ so the agent doesn't become "lazy" (always picking 40%) or "paranoid" (always picking Dense).

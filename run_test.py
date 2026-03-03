@@ -195,22 +195,55 @@ def generation_benchmark(
     (relevant when the model is only temporarily pruned for a single request).
     """
     section("GENERATION SPEED BENCHMARK  (structured pruning only)")
+
+    # ── clean CUDA state: release all stale cached blocks from
+    #    previous prune/unprune cycles so new allocations are contiguous
+    torch.cuda.empty_cache()
+    print(f"  GPU memory (after empty_cache):\n{mem_summary(device)}")
+
     print(f"  {'Prompts':>8}: {prompts}")
     print(f"  {'Runs':>8}: {n_runs} per condition")
 
-    # measure switch overhead (needed for net-speedup column)
+    # ── print per-layer pruned shapes for diagnosis ─────────────
+    wrapper.prune(expert, unstr=False)
+    print(f"\n  Per-layer pruned shapes (structured):")
+    print(f"  {'Layer':>5}  {'Heads':>10}  {'Attn dim':>10}  {'MLP dim':>10}")
+    for idx in range(expert["num_layers"]):
+        layer = wrapper.model.model.layers[idx]
+        h = layer.self_attn.num_heads
+        a = layer.self_attn.q_proj.weight.shape[0]
+        m = layer.mlp.up_proj.weight.shape[0]
+        print(f"  {idx:>5}  {h:>10}  {a:>10}  {m:>10}")
+    total_pruned_params = sum(p.numel() for p in wrapper.model.parameters())
+    print(f"  Total pruned params : {total_pruned_params / 1e9:.2f} B")
+    print(f"  GPU memory (pruned) :\n{mem_summary(device)}")
+
+    # ── warmup generation (both dense and pruned) to trigger
+    #    cuBLAS algorithm selection before timed runs ─────────────
+    print("\n  Running warmup generation (pruned)...")
+    inputs_warmup = tokenizer(prompts[0], return_tensors="pt").to(device)
+    with torch.no_grad():
+        wrapper.model.generate(**inputs_warmup, max_new_tokens=10, do_sample=False)
+    wrapper.unprune()
+    torch.cuda.empty_cache()
+
+    print("  Running warmup generation (dense)...")
+    with torch.no_grad():
+        wrapper.model.generate(**inputs_warmup, max_new_tokens=10, do_sample=False)
+
+    # ── measure switch overhead (needed for net-speedup column) ──
+    torch.cuda.empty_cache()
     switch_ms_list = []
     for _ in range(n_runs):
         wrapper.prune(expert, unstr=False)
-        t_un = _cuda_time_ms(wrapper.unprune, device)   # unprune timing
-        # re-prune and measure prune timing
+        t_un = _cuda_time_ms(wrapper.unprune, device)
         t_pr = _cuda_time_ms(lambda: wrapper.prune(expert, unstr=False), device)
         wrapper.unprune()
         switch_ms_list.append(t_pr + t_un)
     switch_arr = np.array(switch_ms_list)
     switch_mean = float(switch_arr.mean())
     switch_std  = float(switch_arr.std())
-    print(f"  Switch overhead (prune+unprune): "
+    print(f"\n  Switch overhead (prune+unprune): "
           f"{switch_mean:.1f} ± {switch_std:.1f} ms\n")
 
     # header
@@ -230,6 +263,7 @@ def generation_benchmark(
     results = {}
     for n_tok in token_counts:
         # ── dense timing ─────────────────────────────────────────
+        torch.cuda.empty_cache()
         dense_times = []
         for _ in range(n_runs):
             t = 0.0
@@ -246,7 +280,15 @@ def generation_benchmark(
             dense_times.append(t)
 
         # ── pruned timing ─────────────────────────────────────────
+        torch.cuda.empty_cache()
         wrapper.prune(expert, unstr=False)
+        torch.cuda.empty_cache()          # defrag after prune allocations
+
+        # warmup for this token count (cuBLAS may re-select algo for new seq len)
+        with torch.no_grad():
+            wrapper.model.generate(**inputs_warmup, max_new_tokens=min(n_tok, 20),
+                                   do_sample=False)
+
         pruned_times = []
         for _ in range(n_runs):
             t = 0.0
