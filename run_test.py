@@ -19,7 +19,6 @@ Usage
 """
 
 import argparse
-import time
 import sys
 
 import numpy as np
@@ -57,23 +56,16 @@ def generate(wrapper: PrunableLLM, tokenizer, prompts, device: torch.device):
     return results
 
 
-def time_op_cuda(fn, device: torch.device, n: int):
-    """
-    Time fn() for n iterations using CUDA events (wall time on GPU).
-    Returns (mean_ms, std_ms).
-    """
-    timings = []
-    for _ in range(n):
-        start = torch.cuda.Event(enable_timing=True)
-        end = torch.cuda.Event(enable_timing=True)
-        torch.cuda.synchronize(device)
-        start.record(torch.cuda.current_stream(device))
-        fn()
-        end.record(torch.cuda.current_stream(device))
-        torch.cuda.synchronize(device)
-        timings.append(start.elapsed_time(end))   # milliseconds
-    arr = np.array(timings)
-    return float(arr.mean()), float(arr.std())
+def _cuda_time_ms(fn, device: torch.device) -> float:
+    """Run fn() once and return GPU-side elapsed time in ms."""
+    t0 = torch.cuda.Event(enable_timing=True)
+    t1 = torch.cuda.Event(enable_timing=True)
+    torch.cuda.synchronize(device)
+    t0.record()
+    fn()
+    t1.record()
+    torch.cuda.synchronize(device)
+    return t0.elapsed_time(t1)
 
 
 def section(title: str):
@@ -177,6 +169,130 @@ def run_mode(wrapper: PrunableLLM, tokenizer, expert: dict, device: torch.device
 
 
 # ─────────────────────────────────────────────────────────────────
+GEN_TOKEN_COUNTS = (250, 500)
+GEN_TIMING_RUNS = 5
+
+
+def generation_benchmark(
+    wrapper: PrunableLLM,
+    tokenizer,
+    expert: dict,
+    device: torch.device,
+    prompts=PROMPTS,
+    token_counts=GEN_TOKEN_COUNTS,
+    n_runs=GEN_TIMING_RUNS,
+):
+    """Compare greedy-decode throughput: dense vs structured-pruned.
+
+    For each token count, runs n_runs each of:
+      - dense generation
+      - pruned generation  (unstr=False only – real structured pruning)
+
+    Prints a table with columns:
+      Tokens | Dense ms | Pruned ms | Speedup% | Net speedup%
+
+    Net speedup accounts for the one-time prune+unprune switch overhead
+    (relevant when the model is only temporarily pruned for a single request).
+    """
+    section("GENERATION SPEED BENCHMARK  (structured pruning only)")
+    print(f"  {'Prompts':>8}: {prompts}")
+    print(f"  {'Runs':>8}: {n_runs} per condition")
+
+    # measure switch overhead (needed for net-speedup column)
+    switch_ms_list = []
+    for _ in range(n_runs):
+        wrapper.prune(expert, unstr=False)
+        t_un = _cuda_time_ms(wrapper.unprune, device)   # unprune timing
+        # re-prune and measure prune timing
+        t_pr = _cuda_time_ms(lambda: wrapper.prune(expert, unstr=False), device)
+        wrapper.unprune()
+        switch_ms_list.append(t_pr + t_un)
+    switch_arr = np.array(switch_ms_list)
+    switch_mean = float(switch_arr.mean())
+    switch_std  = float(switch_arr.std())
+    print(f"  Switch overhead (prune+unprune): "
+          f"{switch_mean:.1f} ± {switch_std:.1f} ms\n")
+
+    # header
+    col = [14, 22, 22, 11, 26]
+    hdr = [
+        "Tokens",
+        "Dense (ms)",
+        "Pruned (ms)",
+        "Speedup",
+        "Net speedup (w/ switch)",
+    ]
+    sep = "─┼─".join("─" * c for c in col)
+    row_fmt = " │ ".join(f"{{:^{c}}}" for c in col)
+    print("  " + row_fmt.format(*hdr))
+    print("  " + sep)
+
+    results = {}
+    for n_tok in token_counts:
+        # ── dense timing ─────────────────────────────────────────
+        dense_times = []
+        for _ in range(n_runs):
+            t = 0.0
+            for prompt in prompts:
+                inputs = tokenizer(prompt, return_tensors="pt").to(device)
+                def _gen_dense(inp=inputs):
+                    with torch.no_grad():
+                        wrapper.model.generate(
+                            **inp,
+                            max_new_tokens=n_tok,
+                            do_sample=False,
+                        )
+                t += _cuda_time_ms(_gen_dense, device)
+            dense_times.append(t)
+
+        # ── pruned timing ─────────────────────────────────────────
+        wrapper.prune(expert, unstr=False)
+        pruned_times = []
+        for _ in range(n_runs):
+            t = 0.0
+            for prompt in prompts:
+                inputs = tokenizer(prompt, return_tensors="pt").to(device)
+                def _gen_pruned(inp=inputs):
+                    with torch.no_grad():
+                        wrapper.model.generate(
+                            **inp,
+                            max_new_tokens=n_tok,
+                            do_sample=False,
+                        )
+                t += _cuda_time_ms(_gen_pruned, device)
+            pruned_times.append(t)
+        wrapper.unprune()
+
+        da = np.array(dense_times)
+        pa = np.array(pruned_times)
+        d_mean, d_std = float(da.mean()), float(da.std())
+        p_mean, p_std = float(pa.mean()), float(pa.std())
+
+        speedup_pct = (d_mean - p_mean) / d_mean * 100
+        # net: compare dense gen vs (prune + pruned gen + unprune)
+        net_pct = (d_mean - (p_mean + switch_mean)) / d_mean * 100
+
+        results[n_tok] = dict(
+            d_mean=d_mean, d_std=d_std,
+            p_mean=p_mean, p_std=p_std,
+            speedup_pct=speedup_pct, net_pct=net_pct,
+        )
+
+        print("  " + row_fmt.format(
+            str(n_tok),
+            f"{d_mean:.1f} ± {d_std:.1f}",
+            f"{p_mean:.1f} ± {p_std:.1f}",
+            f"{speedup_pct:+.1f}%",
+            f"{net_pct:+.1f}%",
+        ))
+
+    print()
+    print("  Net speedup = (dense_gen - (pruned_gen + switch)) / dense_gen")
+    print("  Negative net speedup = switch overhead dominates at this seq len.")
+    return results
+
+
+# ─────────────────────────────────────────────────────────────────
 def main():
     parser = argparse.ArgumentParser(description="PrunableLLM correctness & timing test")
     parser.add_argument(
@@ -227,15 +343,18 @@ def main():
     print(f"  num_layers     : {expert.get('num_layers')}")
 
     # ── run both modes ────────────────────────────────────────────
-    results = {}
+    correctness = {}
     for unstr in (False, True):
         ok = run_mode(wrapper, tokenizer, expert, device, unstr=unstr)
-        results["structured" if not unstr else "unstructured"] = ok
+        correctness["structured" if not unstr else "unstructured"] = ok
+
+    # ── generation speed benchmark (structured only) ──────────────
+    generation_benchmark(wrapper, tokenizer, expert, device)
 
     # ── final summary ─────────────────────────────────────────────
     section("SUMMARY")
     all_passed = True
-    for mode, ok in results.items():
+    for mode, ok in correctness.items():
         status = "PASS ✓" if ok else "FAIL ✗"
         print(f"  [{status}] {mode}")
         if not ok:
