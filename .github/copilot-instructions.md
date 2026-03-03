@@ -2,6 +2,8 @@
 
 If you change something update in shortly in the copilot-instructions.md!
 
+Treat folder lib as source of truth for the FLAP pruning method. Do not modify it, but feel free to read and understand the code there. The `mom` folder contains our custom implementation of the MoE router and related utilities.
+
 **The Goal:** Build a high-throughput, training-free LLM inference system that uses an RL Agent to dynamically route user prompts to specialized, pruned sub-networks (Experts) based on task complexity and domain.
 
 ---
@@ -54,7 +56,12 @@ mom/          – MoE router implementation (our code)
                       save_expert(data, path)
   run_extract.py    – CLI: collect masks from a calibration dataset → .pt file
   apply_and_eval.py – CLI: load .pt, apply masks/biases, eval PPL + timing
-  __init__.py
+  prunable_llm.py   – PrunableLLM class: reversible prune(expert)/unprune()
+                      wrapper; delta snapshots kept on GPU for fast switching;
+                      pruning inlined (no compress() call); also exports
+                      load_llm() shared model loader
+  __init__.py       – re-exports: extract_flap_masks, save_expert,
+                      PrunableLLM, load_llm
 ```
 
 #### Expert artifact format (`.pt`)
