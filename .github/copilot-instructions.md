@@ -89,8 +89,8 @@ A human-readable `_meta.json` sidecar is also written next to every `.pt`.
 #### Prune / Unprune Switching (measured on LLaMA-7B, 20% AL-AM)
 | Mode | prune() | unprune() | Total |
 |------|---------|-----------|-------|
-| Structured | ~141 ms | ~150 ms | **~291 ms** |
-| Unstructured | ~107 ms | ~27 ms | **~134 ms** |
+| Structured | ~52 ms | ~65 ms | **~117 ms** |
+| Unstructured | ~50 ms | ~19 ms | **~69 ms** |
 
 - **Use unstructured mode** (`unstr=True`) during RL agent training loops — 2× faster switching, and the forward pass quality difference is identical (same masks, same bias compensation).
 - **Use structured mode** (`unstr=False`) for real deployment benchmarks — only structured pruning produces genuinely smaller tensors and memory savings for inference.
@@ -99,6 +99,7 @@ A human-readable `_meta.json` sidecar is also written next to every `.pt`.
 #### Generation Speed Benchmarking
 - Always call `torch.cuda.empty_cache()` before timing after any prune/unprune cycles to avoid CUDA memory fragmentation skewing results.
 - Run a warmup generation (≥10 tokens) before timed runs so cuBLAS algorithm selection doesn't contaminate timing.
+- Structured pruning delivers **~12% generation speedup** at 20% sparsity on LLaMA-7B (L4 GPU, 50-token greedy decode). Raw `F.linear` speedup is ~25% — overhead comes from unchanged embedding/norm/lm_head layers.
 
 #### MLP Mask Alignment (Tensor Core acceleration)
 - NVIDIA cuBLAS uses **64×64 tiles** for FP16 GEMM on Tensor Cores (Ampere, Ada Lovelace, Hopper). If a matrix dimension is not a multiple of 64, cuBLAS falls back to slow edge-safe kernels — even on A100/H100.

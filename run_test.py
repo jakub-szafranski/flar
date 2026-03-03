@@ -225,16 +225,20 @@ def generation_benchmark(
 
     # ── warmup generation (both dense and pruned) to trigger
     #    cuBLAS algorithm selection before timed runs ─────────────
+    #    NOTE: eos_token_id=[] disables early stopping so both
+    #    dense and pruned always generate *exactly* max_new_tokens.
     print("\n  Running warmup generation (pruned)...")
     inputs_warmup = tokenizer(prompts[0], return_tensors="pt").to(device)
     with torch.no_grad():
-        wrapper.model.generate(**inputs_warmup, max_new_tokens=10, do_sample=False)
+        wrapper.model.generate(**inputs_warmup, max_new_tokens=10,
+                               do_sample=False, eos_token_id=[])
     wrapper.unprune()
     torch.cuda.empty_cache()
 
     print("  Running warmup generation (dense)...")
     with torch.no_grad():
-        wrapper.model.generate(**inputs_warmup, max_new_tokens=10, do_sample=False)
+        wrapper.model.generate(**inputs_warmup, max_new_tokens=10,
+                               do_sample=False, eos_token_id=[])
 
     # ── measure switch overhead (needed for net-speedup column) ──
     torch.cuda.empty_cache()
@@ -280,6 +284,7 @@ def generation_benchmark(
                             **inp,
                             max_new_tokens=n_tok,
                             do_sample=False,
+                            eos_token_id=[],
                         )
                 t += _cuda_time_ms(_gen_dense, device)
             dense_times.append(t)
@@ -292,7 +297,7 @@ def generation_benchmark(
         # warmup for this token count (cuBLAS may re-select algo for new seq len)
         with torch.no_grad():
             wrapper.model.generate(**inputs_warmup, max_new_tokens=min(n_tok, 20),
-                                   do_sample=False)
+                                   do_sample=False, eos_token_id=[])
 
         pruned_times = []
         for _ in range(n_runs):
@@ -305,6 +310,7 @@ def generation_benchmark(
                             **inp,
                             max_new_tokens=n_tok,
                             do_sample=False,
+                            eos_token_id=[],
                         )
                 t += _cuda_time_ms(_gen_pruned, device)
             pruned_times.append(t)

@@ -1,0 +1,6 @@
+To Do:
+- Fix Time issue
+-- Run it again with pushed changes
+-- Do CB search
+
+-- remove diagnose.py 
