@@ -101,6 +101,8 @@ def main():
     ap.add_argument("--cache_dir",     default="llm_weights")
     ap.add_argument("--tokens",        nargs="+", type=int, default=[50, 250, 500])
     ap.add_argument("--runs",          type=int, default=5)
+    ap.add_argument("--unstr",         action="store_true",
+                    help="Use unstructured pruning (structured by default)")
     args = ap.parse_args()
 
     np.random.seed(args.seed)
