@@ -1,11 +1,32 @@
 To Do:
-- Fix Time issue
--- Run it again with pushed changes
--- Do CB search
 
--- remove diagnose.py 
+
+Phase I:
+- CB search
+
+- Env + Agent
+-- Jaki agent architektura xddd
+-- Implementacja Env
+--- Reward jaki?
+--- Jaki dataset? mmlu? polaczone oba?
+-- Implementacja CB
+
+
+
+Phase II:
+
+- Przygotować 5 datasetów + cleaning ich
+
+- Jakoś wykluczyć podobne maski? cosine?
+
+- jaki seq len? jak to wplywa?
+
+- na koniec dać calibration samples == 1024
+
 
 
 Na kiedyś (pod koniec projektu):
 - czemy ja mam speedup 12-13% kiedy w paperze oni maja 
-- na koniec dać calibration samples == 1024
+-- zwiększyć batch size (w flap uzywali 1, 2, 4, 8), popatrzeć jak to robią w LLMPruner (test_speedup.py)
+
+- XAI: na co agent zwraca uwage widząc input text jak bardzo zrobić pruning etc

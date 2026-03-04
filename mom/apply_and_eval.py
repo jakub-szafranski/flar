@@ -150,6 +150,10 @@ def main():
         help="Run wikitext2 perplexity evaluation after pruning",
     )
     parser.add_argument(
+        "--eval_iters", type=int, default=None,
+        help="Limit eval to first N iterations (batches) when computing ppl",
+    )
+    parser.add_argument(
         "--save_model", type=str, default=None,
         help="Path to save the pruned model",
     )
@@ -196,7 +200,7 @@ def main():
     if args.do_eval:
         print("[mom] evaluating perplexity …")
         t0 = time.perf_counter()
-        ppl = eval_ppl(model, tokenizer, device)
+        ppl = eval_ppl(model, tokenizer, device, max_iters=args.eval_iters)
         t_eval = time.perf_counter() - t0
         print(f"ppl on wikitext2: {ppl:.2f}")
         print(f"[mom] eval completed in {t_eval:.4f}s")

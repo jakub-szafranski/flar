@@ -174,8 +174,9 @@ def run_mode(wrapper: PrunableLLM, tokenizer, expert: dict, device: torch.device
 
 
 # ─────────────────────────────────────────────────────────────────
-GEN_TOKEN_COUNTS = (250, 500)
-GEN_TIMING_RUNS = 5
+GEN_TOKEN_COUNTS = (50, 150)
+GEN_TIMING_RUNS = 3
+GEN_BATCH_SIZES = (1, 2, 4, 8)
 
 
 def generation_benchmark(
@@ -186,14 +187,15 @@ def generation_benchmark(
     prompts=PROMPTS,
     token_counts=GEN_TOKEN_COUNTS,
     n_runs=GEN_TIMING_RUNS,
+    batch_sizes=GEN_BATCH_SIZES,
 ):
     """Compare greedy-decode throughput: dense vs structured-pruned.
 
-    For each token count, runs n_runs each of:
+    For each batch size and token count, runs n_runs each of:
       - dense generation
       - pruned generation  (unstr=False only – real structured pruning)
 
-    Prints a table with columns:
+    Prints a table per batch size with columns:
       Tokens | Dense ms | Pruned ms | Speedup% | Net speedup%
 
     Net speedup accounts for the one-time prune+unprune switch overhead
@@ -206,8 +208,9 @@ def generation_benchmark(
     torch.cuda.empty_cache()
     print(f"  GPU memory (after empty_cache):\n{mem_summary(device)}")
 
-    print(f"  {'Prompts':>8}: {prompts}")
-    print(f"  {'Runs':>8}: {n_runs} per condition")
+    print(f"  {'Base prompts':>14}: {prompts}")
+    print(f"  {'Runs':>14}: {n_runs} per condition")
+    print(f"  {'Batch sizes':>14}: {list(batch_sizes)}")
 
     # ── print per-layer pruned shapes for diagnosis ─────────────
     wrapper.prune(expert, unstr=False)
@@ -222,26 +225,27 @@ def generation_benchmark(
     total_pruned_params = sum(p.numel() for p in wrapper.model.parameters())
     print(f"  Total pruned params : {total_pruned_params / 1e9:.2f} B")
     print(f"  GPU memory (pruned) :\n{mem_summary(device)}")
+    wrapper.unprune()
 
     # ── warmup generation (both dense and pruned) to trigger
     #    cuBLAS algorithm selection before timed runs ─────────────
     #    NOTE: eos_token_id=[] disables early stopping so both
     #    dense and pruned always generate *exactly* max_new_tokens.
-    print("\n  Running warmup generation (pruned)...")
     inputs_warmup = tokenizer(prompts[0], return_tensors="pt").to(device)
+    print("\n  Running warmup generation (dense)...")
+    with torch.no_grad():
+        wrapper.model.generate(**inputs_warmup, max_new_tokens=10,
+                               do_sample=False, eos_token_id=[])
+
+    print("  Running warmup generation (pruned)...")
+    wrapper.prune(expert, unstr=False)
     with torch.no_grad():
         wrapper.model.generate(**inputs_warmup, max_new_tokens=10,
                                do_sample=False, eos_token_id=[])
     wrapper.unprune()
     torch.cuda.empty_cache()
 
-    print("  Running warmup generation (dense)...")
-    with torch.no_grad():
-        wrapper.model.generate(**inputs_warmup, max_new_tokens=10,
-                               do_sample=False, eos_token_id=[])
-
     # ── measure switch overhead (needed for net-speedup column) ──
-    torch.cuda.empty_cache()
     switch_ms_list = []
     for _ in range(n_runs):
         wrapper.prune(expert, unstr=False)
@@ -253,9 +257,9 @@ def generation_benchmark(
     switch_mean = float(switch_arr.mean())
     switch_std  = float(switch_arr.std())
     print(f"\n  Switch overhead (prune+unprune): "
-          f"{switch_mean:.1f} ± {switch_std:.1f} ms\n")
+          f"{switch_mean:.1f} ± {switch_std:.1f} ms")
 
-    # header
+    # table layout
     col = [14, 22, 22, 11, 26]
     hdr = [
         "Tokens",
@@ -266,19 +270,35 @@ def generation_benchmark(
     ]
     sep = "─┼─".join("─" * c for c in col)
     row_fmt = " │ ".join(f"{{:^{c}}}" for c in col)
-    print("  " + row_fmt.format(*hdr))
-    print("  " + sep)
 
-    results = {}
-    for n_tok in token_counts:
-        # ── dense timing ─────────────────────────────────────────
-        torch.cuda.empty_cache()
-        dense_times = []
-        for _ in range(n_runs):
-            t = 0.0
-            for prompt in prompts:
-                inputs = tokenizer(prompt, return_tensors="pt").to(device)
-                def _gen_dense(inp=inputs):
+    all_results = {}
+    for bs in batch_sizes:
+        print(f"\n{'─' * 60}")
+        print(f"  Batch size = {bs}")
+        print("  " + row_fmt.format(*hdr))
+        print("  " + sep)
+
+        # build a fixed batch of `bs` prompts (cycle through base prompts)
+        batch_prompts = [prompts[i % len(prompts)] for i in range(bs)]
+        batch_inputs_warmup = tokenizer(
+            batch_prompts, return_tensors="pt", padding=True
+        ).to(device)
+
+        results = {}
+        for n_tok in token_counts:
+            # ── dense timing ─────────────────────────────────────
+            torch.cuda.empty_cache()
+            # per-token-count cuBLAS warmup (dense)
+            with torch.no_grad():
+                wrapper.model.generate(**batch_inputs_warmup,
+                                       max_new_tokens=min(n_tok, 20),
+                                       do_sample=False, eos_token_id=[])
+            dense_times = []
+            for _ in range(n_runs):
+                batch_in = tokenizer(
+                    batch_prompts, return_tensors="pt", padding=True
+                ).to(device)
+                def _gen_dense(inp=batch_in):
                     with torch.no_grad():
                         wrapper.model.generate(
                             **inp,
@@ -286,25 +306,24 @@ def generation_benchmark(
                             do_sample=False,
                             eos_token_id=[],
                         )
-                t += _cuda_time_ms(_gen_dense, device)
-            dense_times.append(t)
+                dense_times.append(_cuda_time_ms(_gen_dense, device))
 
-        # ── pruned timing ─────────────────────────────────────────
-        torch.cuda.empty_cache()
-        wrapper.prune(expert, unstr=False)
-        torch.cuda.empty_cache()          # defrag after prune allocations
+            # ── pruned timing ─────────────────────────────────────
+            torch.cuda.empty_cache()
+            wrapper.prune(expert, unstr=False)
+            torch.cuda.empty_cache()      # defrag after prune allocations
 
-        # warmup for this token count (cuBLAS may re-select algo for new seq len)
-        with torch.no_grad():
-            wrapper.model.generate(**inputs_warmup, max_new_tokens=min(n_tok, 20),
-                                   do_sample=False, eos_token_id=[])
-
-        pruned_times = []
-        for _ in range(n_runs):
-            t = 0.0
-            for prompt in prompts:
-                inputs = tokenizer(prompt, return_tensors="pt").to(device)
-                def _gen_pruned(inp=inputs):
+            # per-token-count cuBLAS warmup (pruned)
+            with torch.no_grad():
+                wrapper.model.generate(**batch_inputs_warmup,
+                                       max_new_tokens=min(n_tok, 20),
+                                       do_sample=False, eos_token_id=[])
+            pruned_times = []
+            for _ in range(n_runs):
+                batch_in = tokenizer(
+                    batch_prompts, return_tensors="pt", padding=True
+                ).to(device)
+                def _gen_pruned(inp=batch_in):
                     with torch.no_grad():
                         wrapper.model.generate(
                             **inp,
@@ -312,37 +331,39 @@ def generation_benchmark(
                             do_sample=False,
                             eos_token_id=[],
                         )
-                t += _cuda_time_ms(_gen_pruned, device)
-            pruned_times.append(t)
-        wrapper.unprune()
+                pruned_times.append(_cuda_time_ms(_gen_pruned, device))
+            wrapper.unprune()
+            torch.cuda.empty_cache()
 
-        da = np.array(dense_times)
-        pa = np.array(pruned_times)
-        d_mean, d_std = float(da.mean()), float(da.std())
-        p_mean, p_std = float(pa.mean()), float(pa.std())
+            da = np.array(dense_times)
+            pa = np.array(pruned_times)
+            d_mean, d_std = float(da.mean()), float(da.std())
+            p_mean, p_std = float(pa.mean()), float(pa.std())
 
-        speedup_pct = (d_mean - p_mean) / d_mean * 100
-        # net: compare dense gen vs (prune + pruned gen + unprune)
-        net_pct = (d_mean - (p_mean + switch_mean)) / d_mean * 100
+            speedup_pct = (d_mean - p_mean) / d_mean * 100
+            # net: compare dense gen vs (prune + pruned gen + unprune)
+            net_pct = (d_mean - (p_mean + switch_mean)) / d_mean * 100
 
-        results[n_tok] = dict(
-            d_mean=d_mean, d_std=d_std,
-            p_mean=p_mean, p_std=p_std,
-            speedup_pct=speedup_pct, net_pct=net_pct,
-        )
+            results[n_tok] = dict(
+                d_mean=d_mean, d_std=d_std,
+                p_mean=p_mean, p_std=p_std,
+                speedup_pct=speedup_pct, net_pct=net_pct,
+            )
 
-        print("  " + row_fmt.format(
-            str(n_tok),
-            f"{d_mean:.1f} ± {d_std:.1f}",
-            f"{p_mean:.1f} ± {p_std:.1f}",
-            f"{speedup_pct:+.1f}%",
-            f"{net_pct:+.1f}%",
-        ))
+            print("  " + row_fmt.format(
+                str(n_tok),
+                f"{d_mean:.1f} ± {d_std:.1f}",
+                f"{p_mean:.1f} ± {p_std:.1f}",
+                f"{speedup_pct:+.1f}%",
+                f"{net_pct:+.1f}%",
+            ))
+
+        all_results[bs] = results
 
     print()
     print("  Net speedup = (dense_gen - (pruned_gen + switch)) / dense_gen")
     print("  Negative net speedup = switch overhead dominates at this seq len.")
-    return results
+    return all_results
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -364,7 +385,12 @@ def main():
         "--cache_dir", type=str, default="llm_weights",
         help="Model cache directory",
     )
+    parser.add_argument(
+        "--batch_sizes", type=str, default="1,2,4,8",
+        help="Comma-separated batch sizes for the generation benchmark (default: 1,2,4,8)",
+    )
     args = parser.parse_args()
+    args.batch_sizes = [int(x) for x in args.batch_sizes.split(",")]
 
     device = torch.device(args.device)
 
@@ -402,7 +428,8 @@ def main():
         correctness["structured" if not unstr else "unstructured"] = ok
 
     # ── generation speed benchmark (structured only) ──────────────
-    generation_benchmark(wrapper, tokenizer, expert, device)
+    generation_benchmark(wrapper, tokenizer, expert, device,
+                         batch_sizes=args.batch_sizes)
 
     # ── final summary ─────────────────────────────────────────────
     section("SUMMARY")

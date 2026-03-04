@@ -6,7 +6,7 @@ import tqdm
 from .data import get_loaders 
 
 # Function to evaluate perplexity (ppl) on a specified model and tokenizer
-def eval_ppl(model, tokenizer, device=torch.device("cuda:0")):
+def eval_ppl(model, tokenizer, device=torch.device("cuda:0"), max_iters=None):
     """
     Evaluate perplexity (ppl) on a specified model and tokenizer.
 
@@ -32,11 +32,11 @@ def eval_ppl(model, tokenizer, device=torch.device("cuda:0")):
     # Evaluate perplexity in no grad context to avoid updating the model
     with torch.no_grad():
         # Perplexity measures how well the probability distribution predicted by the model aligns with the actual distribution of the words. Lower perplexity is better.
-        ppl = eval_ppl_wikitext(model, testloader, 1, device)
+        ppl = eval_ppl_wikitext(model, testloader, 1, device, max_iters=max_iters)
     return ppl 
 
 # Function to evaluate perplexity (ppl) specifically on the wikitext dataset
-def eval_ppl_wikitext(model, testenc, bs=1, device=None):
+def eval_ppl_wikitext(model, testenc, bs=1, device=None, max_iters=None):
     """
     Evaluate perplexity (ppl) specifically on the wikitext dataset.
 
@@ -59,7 +59,9 @@ def eval_ppl_wikitext(model, testenc, bs=1, device=None):
     nlls = []
     print(f"nsamples {nsamples}")
 
-    # Loop through each batch
+    # Loop through each batch; optionally limit to first `max_iters` iterations
+    iter_count = 0
+    processed_samples = 0
     for i in tqdm.tqdm(range(0, nsamples, bs)):
         # Calculate end index
         j = min(i+bs, nsamples)
@@ -84,9 +86,15 @@ def eval_ppl_wikitext(model, testenc, bs=1, device=None):
 
         # Append to list of negative log likelihoods
         nlls.append(neg_log_likelihood)
+        processed_samples += (j - i)
+        iter_count += 1
+        if (max_iters is not None) and (iter_count >= max_iters):
+            break
 
-    # Compute perplexity
-    ppl = torch.exp(torch.stack(nlls).sum() / (nsamples * model.seqlen))    # ppl = exp(∑(nlls) / (num_samples * sequence_length))
+    # Compute perplexity using actually processed samples
+    if processed_samples == 0:
+        return float('nan')
+    ppl = torch.exp(torch.stack(nlls).sum() / (processed_samples * model.seqlen))    # ppl = exp(∑(nlls) / (num_processed_samples * sequence_length))
 
     # Empty CUDA cache to save memory
     torch.cuda.empty_cache()
