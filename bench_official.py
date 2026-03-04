@@ -39,8 +39,9 @@ import numpy as np
 import torch
 from transformers import AutoTokenizer
 
-# ── repo-local patched model class ──────────────────────────────
+# ── repo-local helpers ───────────────────────────────────────────
 from models.hf_llama.modeling_llama import LlamaForCausalLM
+from mom.prunable_llm import load_llm
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -162,25 +163,15 @@ def main():
     tokenizer.pad_token = tokenizer.eos_token
 
     print(f"  Loading dense model: {args.model}")
-    dense = LlamaForCausalLM.from_pretrained(
-        args.model, torch_dtype=torch.float16,
-        cache_dir=args.cache_dir, low_cpu_mem_usage=True,
-    ).to(device).eval()
-    # initialise biases (required by patched model)
-    for layer in dense.model.layers:
-        layer.self_attn.o_proj.bias = torch.nn.Parameter(
-            torch.zeros(layer.self_attn.o_proj.out_features,
-                        dtype=torch.float16, device=device))
-        layer.mlp.down_proj.bias = torch.nn.Parameter(
-            torch.zeros(layer.mlp.down_proj.out_features,
-                        dtype=torch.float16, device=device))
+    # load_llm() initialises biases and handles device placement correctly
+    dense = load_llm(args.model, cache_dir=args.cache_dir).to(device).eval()
     dense_params = sum(p.numel() for p in dense.parameters())
     print(f"  Dense params : {dense_params/1e9:.2f} B")
     print(f"  GPU memory   :\n{mem_str(device)}")
 
     print(f"\n  Loading compressed model from: {args.save_dir}")
     compressed = LlamaForCausalLM.from_pretrained(
-        args.save_dir, torch_dtype=torch.float16, low_cpu_mem_usage=True,
+        args.save_dir, torch_dtype=torch.float16,
     ).to(device).eval()
     comp_params  = sum(p.numel() for p in compressed.parameters())
     param_reduction = (dense_params - comp_params) / dense_params * 100
