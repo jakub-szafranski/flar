@@ -4,3 +4,8 @@ To Do:
 -- Do CB search
 
 -- remove diagnose.py 
+
+
+Na kiedyś (pod koniec projektu):
+- czemy ja mam speedup 12-13% kiedy w paperze oni maja 
+- na koniec dać calibration samples == 1024
