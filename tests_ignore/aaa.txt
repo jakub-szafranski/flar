@@ -5,10 +5,8 @@ Phase I:
 - CB search
 
 - Env + Agent
--- Jaki agent architektura xddd: 
 -- Implementacja Env
 --- Reward jaki?
---- Jaki dataset? mmlu? polaczone oba?
 -- Implementacja CB
 
 

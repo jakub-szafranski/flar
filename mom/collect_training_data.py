@@ -37,7 +37,7 @@ def get_llm(model_name: str, device: str = "cuda:0", cache_dir: str = "llm_weigh
     return model
 
 
-LABELS = ["A", "B", "C", "D"]
+LABELS = ["A", "B", "C", "D", "E"]  # max 5; MMLU uses first 4, CSQA uses all 5
 
 
 def format_prompt(question: str, choices: list[str]) -> str:
@@ -49,13 +49,13 @@ def format_prompt(question: str, choices: list[str]) -> str:
 # ── normalise datasets into a unified iterator ───────────────────
 
 def iter_commonsense_qa():
-    """Yield (question, choices[4], correct_idx) from CommonsenseQA train."""
+    """Yield (question, choices[5], correct_idx) from CommonsenseQA train."""
     ds = load_dataset("tau/commonsense_qa", split="train")
     label_map = {l: i for i, l in enumerate(LABELS)}
     for row in ds:
-        choices = row["choices"]["text"][:4]
+        choices = row["choices"]["text"]
         key = row["answerKey"]
-        if key not in label_map or len(choices) != 4:
+        if key not in label_map or len(choices) != 5:
             continue
         yield row["question"], choices, label_map[key]
 
@@ -63,8 +63,17 @@ def iter_commonsense_qa():
 def iter_mmlu():
     """Yield (question, choices[4], correct_idx) from MMLU auxiliary_train."""
     ds = load_dataset("cais/mmlu", "auxiliary_train", split="train")
+    # auto-detect choices column (list vs. separate A/B/C/D columns)
+    first = ds[0]
+    if "choices" in first:
+        get_choices = lambda row: row["choices"]
+    elif all(k in first for k in ["A", "B", "C", "D"]):
+        get_choices = lambda row: [row["A"], row["B"], row["C"], row["D"]]
+    else:
+        raise ValueError(f"Cannot find choices columns. Available: {list(first.keys())}")
+
     for row in ds:
-        choices = row["choices"][:4]
+        choices = get_choices(row)
         if len(choices) != 4:
             continue
         yield row["question"], choices, int(row["answer"])
@@ -92,7 +101,7 @@ def evaluate_batch(
     seq_lens = attention_mask.sum(dim=1) - 1  # (B,)
     last_logits = logits[torch.arange(len(prompts), device=device), seq_lens]  # (B, V)
 
-    answer_logits = last_logits[:, answer_token_ids]  # (B, 4)
+    answer_logits = last_logits[:, answer_token_ids]  # (B, N) where N=4 or 5
     preds = answer_logits.argmax(dim=1).tolist()
     return preds
 
@@ -110,6 +119,7 @@ def collect(
     tag: str,
     out_path: str,
     existing: list[dict],
+    src: str,
     save_every: int = 500,
 ) -> list[dict]:
     """
@@ -139,7 +149,7 @@ def collect(
                                answer_token_ids, device)
         for q, ch, gt, pred in zip(batch_q, batch_c, batch_idx, preds):
             if pred == gt:
-                collected.append({"question": q, "answers": ch, "correct": gt})
+                collected.append({"question": q, "answers": ch, "correct": gt, "_src": src})
 
         # periodic save
         new_hits = len(collected) - start_count
@@ -160,7 +170,7 @@ def collect(
                                answer_token_ids, device)
         for q, ch, gt, pred in zip(batch_q, batch_c, batch_idx, preds):
             if pred == gt and (len(collected) - start_count) < target:
-                collected.append({"question": q, "answers": ch, "correct": gt})
+                collected.append({"question": q, "answers": ch, "correct": gt, "_src": src})
 
     pbar.n = len(collected) - start_count
     pbar.close()
@@ -199,16 +209,12 @@ def main():
     tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "left"  # decoder-only: pad on left
 
-    # resolve answer token ids: " A", " B", " C", " D"
-    answer_token_ids = [tokenizer.encode(f" {l}", add_special_tokens=False)[-1]
-                        for l in LABELS]
-    print(f"Answer token IDs: {dict(zip(LABELS, answer_token_ids))}")
-
-    # tag samples with source for resume bookkeeping
-    def tag_src(samples, src):
-        for s in samples:
-            s["_src"] = src
-        return samples
+    # resolve answer token ids per dataset (“ A”, “ B”, ... with leading space)
+    all_token_ids = [tokenizer.encode(f" {l}", add_special_tokens=False)[-1]
+                     for l in LABELS]
+    csqa_token_ids = all_token_ids          # A-E (5 choices)
+    mmlu_token_ids = all_token_ids[:4]      # A-D (4 choices)
+    print(f"Answer token IDs: {dict(zip(LABELS, all_token_ids))}")
 
     # ── CommonsenseQA ──
     csqa_done = len([s for s in collected if s.get("_src") == "csqa"])
@@ -217,11 +223,10 @@ def main():
             model, tokenizer, iter_commonsense_qa(),
             target=args.csqa_target - csqa_done,
             batch_size=args.batch_size, device=args.device,
-            answer_token_ids=answer_token_ids,
+            answer_token_ids=csqa_token_ids,
             tag="CSQA", out_path=args.output,
-            existing=collected, save_every=args.save_every,
+            existing=collected, src="csqa", save_every=args.save_every,
         )
-        tag_src([s for s in collected if "_src" not in s], "csqa")
 
     # ── MMLU ──
     mmlu_done = len([s for s in collected if s.get("_src") == "mmlu"])
@@ -230,11 +235,10 @@ def main():
             model, tokenizer, iter_mmlu(),
             target=args.mmlu_target - mmlu_done,
             batch_size=args.batch_size, device=args.device,
-            answer_token_ids=answer_token_ids,
+            answer_token_ids=mmlu_token_ids,
             tag="MMLU", out_path=args.output,
-            existing=collected, save_every=args.save_every,
+            existing=collected, src="mmlu", save_every=args.save_every,
         )
-        tag_src([s for s in collected if "_src" not in s], "mmlu")
 
     # strip internal bookkeeping key before final save
     for s in collected:
