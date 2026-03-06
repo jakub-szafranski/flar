@@ -5,7 +5,7 @@ Phase I:
 - CB search
 
 - Env + Agent
--- Jaki agent architektura xddd
+-- Jaki agent architektura xddd: 
 -- Implementacja Env
 --- Reward jaki?
 --- Jaki dataset? mmlu? polaczone oba?
@@ -23,10 +23,19 @@ Phase II:
 
 - na koniec dać calibration samples == 1024
 
+Phase III:
+
+- A co jakby zmniejszyć model tak, ze jest glowna shared maska (intersection miedzy maskami?) na nw 20% i zawsze model ma min 10/20% sparsity i od tego poziomu zawsze moze wziąć inną maskę która dołozy mu kolejne 10%/20% - jeszcze GenAI brainstorming na tym
+
+- XAI: na co agent zwraca uwage widząc input text jak bardzo zrobić pruning etc - do tego musze robic full ft?
 
 
 Na kiedyś (pod koniec projektu):
-- czemy ja mam speedup 12-13% kiedy w paperze oni maja 
--- zwiększyć batch size (w flap uzywali 1, 2, 4, 8), popatrzeć jak to robią w LLMPruner (test_speedup.py)
 
-- XAI: na co agent zwraca uwage widząc input text jak bardzo zrobić pruning etc
+- czemy ja mam speedup 12-13% kiedy w paperze oni maja 
+    -- popatrzeć jak to robią w LLMPruner (test_speedup.py)
+    -- wyjebane xdd podać FLOPs + tabelka ile tokenów wygenerowanych to jest jaki % dorównania prędkości FLAP (czyli czas vs czas + pruning/unpruning)
+    -- pokazac ze 20% pruned model jest 12% szybszy po tych 100-200 tokenach i ze go doganiam; oo ze wykres 0-500 tokenow z liniowym wykresem z latency (0.2 vs ours vs base latency); XDD i ze jak bede sie bac pokazac 12% na y axis to y axis to jest czas 0.2 modelu flap i pokazuje w % jak wolniejsze jest moje i base i moje bedzie po x tokenach dorownywac xdd
+    -- jezeli latency 1 tokenu generacji bedzie mniejsze to moze zobaczyc jaki jest czas FLAP vs ours na BoolQA czy czymś takim (przy takim samym accuracy) więc np mój 30% ma takie samo accuracy jak FLAP 20% i jest szybsze -- a moze zamiast czasu FLOPs?
+
+- Chwale się ze trenuje jedynie nw 700 parametrów co jest 0.01% LLMu i ze dodaje 0.01% parametrów i w dashboardzie pokazać, ze LLmPruner miał trenujacych w LoRA 4% czy coś

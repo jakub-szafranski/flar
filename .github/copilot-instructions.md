@@ -60,6 +60,9 @@ mom/          – MoE router implementation (our code)
                       wrapper; delta snapshots kept on GPU for fast switching;
                       pruning inlined (no compress() call); also exports
                       load_llm() shared model loader
+  collect_training_data.py – CLI: run dense model on CommonsenseQA + MMLU,
+                      collect correctly-answered MCQs (2k+3k) into a
+                      standardised {question, answers, correct} .pt file
   __init__.py       – re-exports: extract_flap_masks, save_expert,
                       PrunableLLM, load_llm
 ```
@@ -112,6 +115,7 @@ A human-readable `_meta.json` sidecar is also written next to every `.pt`.
 
 ### Next Steps / Remaining Challenges
 * **State Encoder Design:** Selecting a sub-5ms embedding model to ensure the routing overhead doesn't cancel out the pruning gains.
+* **State Encoder Design:** Use a frozen ModernBert encoder with standard mean-pooling over token embeddings to produce the prompt state embedding (keep the encoder weights strictly frozen). On top of that embedding, attach a lightweight linear head implemented as a `NeuralLinear` (LinTS-style) head which maintains a Gaussian posterior over linear weights for fast Bayesian updates. For action selection use Thompson Sampling (sample a weight from the posterior, compute logits for the discrete expert actions, and pick the argmax). This design keeps runtime overhead minimal, enables principled exploration during RL training, and fits the LinTS / Thompson-Sampling workflow used for low-latency routing.
 * **Reward Function Tuning:** Carefully balancing the penalty $\lambda$ so the agent doesn't become "lazy" (always picking 40%) or "paranoid" (always picking Dense).
 * **Action Mapping:** Ensuring the agent effectively differentiates between domain-specific experts versus general-purpose ones.
 * **Custom calibration datasets:** `lib/data.py` currently supports `wikitext2`, `c4`, `ptb`. LogiQA / MBPP / GSM8K / PubMed loaders need to be added there, then referenced via `--calibration_dataset`.
