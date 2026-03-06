@@ -64,20 +64,14 @@ def iter_mmlu():
     """Yield (question, choices[4], correct_idx) from MMLU auxiliary_train."""
     raw = load_dataset("cais/mmlu", "auxiliary_train")
     ds = raw["train"] if hasattr(raw, "keys") else raw
-    # auto-detect choices column (list vs. separate A/B/C/D columns)
-    first = ds[0]
-    if "choices" in first:
-        get_choices = lambda row: row["choices"]
-    elif all(k in first for k in ["A", "B", "C", "D"]):
-        get_choices = lambda row: [row["A"], row["B"], row["C"], row["D"]]
-    else:
-        raise ValueError(f"Cannot find choices columns. Available: {list(first.keys())}")
 
     for row in ds:
-        choices = get_choices(row)
+        # this dataset wraps each record under a nested "train" key
+        r = row["train"] if "train" in row else row
+        choices = r["choices"]
         if len(choices) != 4:
             continue
-        yield row["question"], choices, int(row["answer"])
+        yield r["question"], choices, int(r["answer"])
 
 
 # ── batched evaluation ───────────────────────────────────────────
