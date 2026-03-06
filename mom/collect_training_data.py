@@ -62,7 +62,8 @@ def iter_commonsense_qa():
 
 def iter_mmlu():
     """Yield (question, choices[4], correct_idx) from MMLU auxiliary_train."""
-    ds = load_dataset("cais/mmlu", "auxiliary_train", split="train")
+    raw = load_dataset("cais/mmlu", "auxiliary_train")
+    ds = raw["train"] if hasattr(raw, "keys") else raw
     # auto-detect choices column (list vs. separate A/B/C/D columns)
     first = ds[0]
     if "choices" in first:
