@@ -26,12 +26,13 @@ from models.hf_llama.modeling_llama import LlamaForCausalLM
 
 
 # ── model loading (same pattern as everywhere else) ──────────────
-def get_llm(model_name: str, cache_dir: str = "llm_weights"):
+def get_llm(model_name: str, device: str = "cuda:0", cache_dir: str = "llm_weights"):
     model = LlamaForCausalLM.from_pretrained(
         model_name,
         torch_dtype=torch.float16,
         cache_dir=cache_dir,
         low_cpu_mem_usage=True,
+        device_map=device,
     )
     return model
 
@@ -192,8 +193,7 @@ def main():
 
     # load model + tokenizer
     print(f"Loading {args.model} …")
-    model = get_llm(args.model)
-    model.to(args.device)
+    model = get_llm(args.model, device=args.device)
     model.eval()
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     tokenizer.pad_token = tokenizer.eos_token
